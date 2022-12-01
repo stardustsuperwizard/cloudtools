@@ -1,0 +1,29 @@
+appName: sitechecker
+
+environments:
+  test:
+    global:
+      events:
+        schedule:
+          rate: 'cron(*/30 * ? * * *)'
+          enabled: true
+    region:
+      us-east-1:
+        vpc:
+          id: 'vpc-x'
+          securityGroup1: 'sg-x'
+          subnet1: 'subnet-x'
+          subnet2: 'subnet-x'
+  prod:
+    global:
+      events:
+        schedule:
+          rate: 'cron(1 12 ? * * *)'
+          enabled: true
+    region:
+      us-east-1:
+        vpc:
+          id: 'vpc-x'
+          securityGroup1: 'sg-x'
+          subnet1: 'subnet-x'
+          subnet2: 'subnet-x'

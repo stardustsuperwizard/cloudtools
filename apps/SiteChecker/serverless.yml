@@ -1,0 +1,117 @@
+service: sitechecker
+
+custom:
+  parameters: ${file(./parameters.yaml)}
+
+provider:
+  name: aws
+  stackName: ${opt:stage}-${self:custom.parameters.appName}
+  runtime: python3.9
+  memorySize: 128
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - 'sqs:SendMessage'
+            - 's3:*'
+          Resource: '*'
+
+package:
+  individually: true
+  patterns:
+    - '!**/**'
+
+functions:
+  function001:
+    name: ${self:custom:prodider.stackName}-function001
+    description: Reads a list of IP Addresses and then pushes to SQS
+    handler: src/lambda_function_001.lambda_handler
+    timeout: 300
+    events:
+      - schedule:
+          rate: ${self:custom.parameters.environments.${opt:stage}.global.events.schedule.rate}
+          enabled: ${self:custom.parameters.environments.${opt:stage}.global.events.schedule.enabled}
+    environment:
+      APP_ENV: ${opt:stage}
+      APP_ACCOUNT: {'Ref': ['AWS::AccountId']}
+      S3_BUCKET: {'Ref': ['rBucket']}
+    package:
+      patterns:
+        - 'src/lambda_function_001.py'
+    tags:
+      Environment: ${opt:stage}
+
+  function002:
+    name: ${self:custom:prodider.stackName}-function002
+    description: Processes IPs in SQS for connectivity.
+    handler: src/lambda_function_002.lambda_handler
+    timeout: 300
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt:
+              - rSQS001
+              - Arn
+          batchSize: 6
+    vpc:
+      securityGroupIds:
+        - ${self:custom.parameters.environments.region.${opt:stage}.region.${opt:region}.vpc.securityGroup1}
+      subnetIds:
+        - ${self:custom.parameters.environments.region.${opt:stage}.region.${opt:region}.vpc.subnet1}
+        - ${self:custom.parameters.environments.region.${opt:stage}.region.${opt:region}.vpc.subnet2}
+    environment:
+      APP_ENV: ${opt:stage}
+      APP_ACCOUNT: {'Ref': ['AWS::AccountId']}
+      S3_BUCKET: {'Ref': ['rBucket']}
+    package:
+      patterns:
+        - 'src/lambda_function_002.py'
+    tags:
+      Environment: ${opt:stage}
+
+resources:
+  Resources:
+    rSQS001:
+      Type: AWS::SQS::Queue
+      DependsOn: rSQS002
+      Properties:
+        QueueName: ${opt:stage}-sitechecker
+        VisibilityTimeout: 1200
+        RedrivePolicy:
+          deadLetterTargetArn: { 'fn::GetAtt': ['rSQS002', 'Arn']}
+          maxReceiveCount: 2
+
+    rSQS002:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${opt:stage}-sitechecker-dlq
+
+    rSQSPolicy001:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        PolicyDocument:
+          Statement:
+            - Sid: MySQSPolicy001
+              Effect: Allow
+              Principal:
+                Service:
+                  - ecs.amazonaws.com
+                  - lambda.amazonaws.com
+              Action:
+                - sqs:SendMessage
+                - sqs:SendMessageBatch
+              Resource: {'Fn::GetAtt': ['rSQS001', 'Arn']}
+      Queues:
+        - { 'Fn::GetAtt': ['rSQS001', 'QueueURL']}
+
+    rBucket:
+      Type: AWS::S3::Bucket
+      Description: Bucket for IP List Intake
+      Properties:
+        BucketName: {'Fn::Sub': '${opt:stage}-sitechecker-j48dj3nf75k-${AWS::Region}'}
+        BucketEncryption:
+          ServerSideEnvryptionConfiguration:
+            - BucketKeyEnabled: true
+              ServerSideEncryptionByDefault:
+                SSEAlgorithm: aws:kms

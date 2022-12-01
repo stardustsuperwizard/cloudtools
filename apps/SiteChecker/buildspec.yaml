@@ -1,0 +1,16 @@
+version: 0.2
+
+env:
+  variables:
+    USERNAME: user
+
+phases:
+  install:
+    commands:
+      - npm install -g serverless
+  build:
+    commands:
+      - serverless deploy --stage $STAGE --region $PRIMARY_REGION
+      # - serverless undeploy --stage $STAGE --region $PRIMARY_REGION
+      # - serverless deploy --stage $STAGE --region $SECONDARY_REGION_1
+      # - serverless undeploy --stage $STAGE --region $SECONDARY_REGION_1

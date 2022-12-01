@@ -1,0 +1,350 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: Basic Pipeline with Test/Prod and approval gate. Perfect for Serverless.com framework.
+
+Parameters:
+  aStackName:
+    Type: String
+    Description: Name of the stack, copy and paste in Stack Name field.
+    Default: basic-pipeline
+  pAppName:
+    Type: String
+    Description: Name of the application that this stack is associated with.
+  pCodeCommitRepo:
+    Type: String
+    Description: Name of the Code Commit Repo that will house all files that the pipeline will run from.
+  pEnvironment:
+    Type: String
+    Description: Type of application that is being deployed.
+    Default: prod
+    AllowedValues:
+      - dev
+      - test
+      - prod
+    ConstraintDescription: You must specify a value.
+  pSubnet1:
+    Type: 'AWS::EC2::Subnet::Id'
+    Desciption: Specifies where the codebuild job will run in a VPC.
+  pVPC:
+    Type: 'AWS::EC2::VPC::Id'
+    Description: Specifies what VPC that the CodeBuild job will run in.
+  zPipeline:
+    Type: String
+    Description: Do you need to deploy a Pipeline? Do not create a pipeline if this is a replica region.
+    Default: false
+    AllowedValues:
+      - true
+      - false
+    ConstraintDescription: You must specify a value.
+
+Conditions:
+  CreatePipeline: !Equals
+    - !Ref zPipeline
+    - true
+
+Mappings:
+  SecondRegionMap:
+    us-east-1:
+      SecondRegion1: us-east-2
+    us-east-2:
+      SecondRegion1: us-east-1
+
+Resources:
+  rCodeCommit01:
+    Type: AWS::CodeCommit::Repository
+    DeletionPolicy: Delete
+    Properties:
+      RepositoryDescription: Repository for files.
+      RepositoryName: !Ref ${pAppName}
+      Tags:
+        - Key: Stack
+          Value: !Ref aStackName
+
+  rCodeBuildSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreatePipeline
+    Properties:
+      GroupDescription: !Sub ${pEnvironment}-${pAppName}-CodeBuild
+      VpcId: !Ref pVpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${pEnvironment} - ${pAppName} - CodeBuild
+        - Key: Environment
+          Value: !Ref ${pEnvironment}
+# Conditional resources depending on if Pipeline is to be deployed.
+  rCodePipelineServiceRole:
+    Type: 'AWS::IAM::Role'
+    Condition: CreatePipeline
+    Properties:
+      Path: !Sub /${pAppName}/
+      RoleName: !Sub ${pEnvironment}-${pAppName}-ServiceRole-${AWS::Region}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+                - codebuild.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: AWS-CodePipeline-Service
+          PolicyDocument:
+            Version:  '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'Codecommit:CancelUploadArchive'
+                  - 'codecommit:GetBranch'
+                  - 'codecommit:GetCommit'
+                  - 'codecommit:GetUploadArchiveStatus'
+                  - 'codecommit:UploadArchive'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'codebuild:BatchGetBuilds'
+                  - 'codebuild:StartBuild'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'devicefarm:ListProjects'
+                  - 'devicefarm:ListDevicePools'
+                  - 'devicefarm:GetRun'
+                  - 'devicefarm:GetUpload'
+                  - 'devicefarm:CreateUpload'
+                  - 'devicefarm:ScheduleRun'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'lambda:InvokeFunctions'
+                  - 'lambda:ListFunctions'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'iam:PassRole'
+                Resource: '*'
+              - Sid: 'mainActions'
+                Effect: Allow
+                Action:
+                  - 'apigateway:DELETE'
+                  - 'apigateway:GET'
+                  - 'apigateway:GetResources'
+                  - 'apigateway:PATCH'
+                  - 'apigateway:POST'
+                  - 'apigateway:PUT'
+                  - 'apigateway:UpdateRestApiPolicy'
+                  - 'autoscaling:*'
+                  - 'cloudformation:*'
+                  - 'cloudwatch:*'
+                  - 'ec2:*'
+                  - 'ecs:*'
+                  - 'elasticbeanstalk:*'
+                  - 'elasticloadbalancing:*'
+                  - 'events:*'
+                  - 'iam:AttachRolePolicy'
+                  - 'iam:CreateRole'
+                  - 'iam:DeleteRole'
+                  - 'iam:DeleteRolePolicy'
+                  - 'iam:DetachRolePolicy'
+                  - 'iam:GetRole'
+                  - 'iam:GetRolePolicy'
+                  - 'iam:PutRolePolicy'
+                  - 'lambda:*'
+                  - 'logs:*'
+                  - 'rds:*'
+                  - 's3:*'
+                  - 'sns:*'
+                  - 'sqs:*'
+                  - 'states:*'
+                Resource: '*'
+
+  rInvokeCodepipeline:
+    Type: AWS::Events::Rule
+    Condition: CreatePipeline
+    DependsOn: rInvokeCodepipelineRole
+    Properties:
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.codecommit
+        detail-type:
+          - CodeCommit Repository State Change
+        resouces: 
+          - !Join
+            - ''
+            - - 'arn:aws:codecommit:'
+            - !Ref AWS::Region
+            - ':' 
+            - !Ref AWS::AccountId
+            - ':' 
+            - !GetAtt rCodeCommit01.Name
+        detail:
+          event:
+            - referenceCreated
+            - referenceUpdated
+          referenceType:
+            - branch
+          referenceName:
+            - main
+      Targets:
+        - Arn: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${rAppPipeline}
+          RoleArn: !GetAtt rInvokeCodepipelineRole.Arn
+          Id: InvokeCodepipeline
+
+  rInvokeCodepipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: !Sub /${pAppName}/
+      RoleName: !Sub ${pEnvironment}-${pAppName}-InvokeCodePipeline-${AWS::Region}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          Effect: Allow
+          Action: sts:AssumeRole
+          Principal:
+            Service: events.amazonaws.com
+      Policies:
+        - PolicyName: !Sub ${pEnvironment}-${pAppName}-InvokeCodepipeline-Policy-${AWS::Region}
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codepipeline:StartPipelineExecution
+                Resource: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${rAppPipeline}
+
+  rCodeBuildProject01:
+    Type: AWS::CodeBuild::Project
+    Condition: CreatePipeline
+    DependsOn: rCodeBuildSecurityGroup
+    Properties:
+      Name: !Sub ${pEnvironment}-${pAppName}-01
+      Description: Serverless.com build job.
+      ServiceRole: !GetAtt rCodePipelineServiceRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINIUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: public.ecr.aws/codebuild.amazonlinux2-x86_64-standard:3.0
+        EnvironmentVariables:
+          - Name: PRIMARY_REGION
+            Type: PLAINTEXT
+            Value: !Ref 'AWS::Region'
+          - Name: SECONDARY_REGION_1
+            Type: PLAINTEXT
+            Value: !FindInMap [SecondRegionMap, !Ref 'AWS::Region', SecondRegion1]
+        Source:
+          Type: CODEPIPELINE
+        TimeoutInMinutes: 10
+        VpcConfig:
+          VpcId: !Ref pVpc
+          Subnets: [!Ref pSubnet1]
+          SecurityGroupIds: [!Ref rCodeBuildSecurityGroup]
+        LogsConfig:
+          CloudWatchLogs:
+            Status: ENABLED
+        Tags:
+          - Key: StackName
+            Value: !Ref aStackName
+          - Key: AppName
+            Value: !Ref pAppName
+          - Key: Environment
+            Value: !Ref pEnvironment
+
+  rS3Bucket:
+    Type: AWS::S3::Bucket
+    Condition: CreatePipeline
+    Description: This is the S3 Bucket that holds all artifacts for this pipeline.
+    Properties:
+      BucketEncrption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+      Tags:
+        - Key: StackName
+          Value: !Ref aStackName
+        - Key: AppName
+          Value: !Ref pAppName
+        - Key: Environment
+          Value: !Ref pEnvironment
+
+  rAppPipeline: 
+    Type: AWS::CodePipeline::Pipeline
+    Condition: CreatePipeline
+    Properties: 
+      Name: !Sub ${pEnvironment}-${pAppName}
+      RoleArn: !Ref rCodePipelineServiceRole
+      ArtifactStores:
+        - Region: !Ref ${AWS::Region}
+          ArtifactStore: 
+            Type: S3 
+            Location: !Ref rS3Bucket
+        # - Region: us-east-1
+        #   ArtifactStore: 
+        #     Type: S3 
+        #     Location: mybucket1
+        # - Region: us-east-2
+        #   ArtifactStore: 
+        #     Type: S3 
+        #     Location: mybucket2
+      Stages: 
+        - Name: Source 
+          Actions: 
+            - 
+              Name: SourceAction
+              ActionTypeId: 
+                Category: Source 
+                Owner: AWS 
+                Version: 1 
+                Provider: CodeCommit 
+              OutputArtifacts: 
+                - Name: SourceOutput 
+              Configuration: 
+                BranchName: main 
+                RepositoryName: !GetAtt rCodeCommit01.Name
+                PollForSourceChanges: false
+              RunOrder: 1 
+        - Name: Test 
+          Actions: 
+            - Name: DeployLambdas 
+              InputArtifacts: 
+                - Name: SourceOutput 
+              ActionTypeId: 
+                Category: Build 
+                Owner: AWS 
+                Version: 1 
+                Provider: CodeBuild
+              Configuration: 
+                ProjectName: !Ref rCodeBuildProject01 
+                EnvironmentVariables: '[{"name":"STAGE", "value":"test", "type": "PLAINTEXT"}]'
+              RunOrder: 1 
+            - Name: ApproveTest
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: 1
+              RunOrder: 2
+        - Name: Prod 
+          Actions: 
+            - Name: DeployLambdas 
+              InputArtifacts: 
+                - Name: SourceOutput 
+              ActionTypeId: 
+                Category: Build 
+                Owner: AWS 
+                Version: 1 
+                Provider: CodeBuild
+              Configuration: 
+                ProjectName: !Ref rCodeBuildProject01 
+                EnvironmentVariables: '[{"name":"STAGE", "value":"prod", "type": "PLAINTEXT"}]'
+              RunOrder: 1 
+      Tags:
+        - Key: Stack
+          Value: !Ref aStackName
+
+Outputs:
+  oCodeCommitRepo:
+    Description: Put all application files here and pipeline will run.
+    Value: !GetAtt rCodeCommit01.Name

@@ -1,0 +1,14 @@
+{
+    "name": "sitechecker",
+    "version": "1.0.0",
+    "description": "application for pinging sites to verify that they are online.",
+    "main": "src/lambda_function.py",
+    "scripts": {
+        "test": "echo \"Error: no test specified.\" && exit 1"
+    },
+    "keywords": [
+        "stuff"
+    ],
+    "author": "Michael Miller",
+    "license": "MIT"
+}
