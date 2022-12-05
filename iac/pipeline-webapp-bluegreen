@@ -1,0 +1,522 @@
+AWSTemplateFormateVersion: "2010-09-09"
+Description: >
+  This template sets up a fargate web app with pipeline.
+  https://github.com/1Strategy/fargate-cloudformation-example/blob/master/fargate.yaml
+  https://github.com/shashank070/aws-codepipeline-ecs-bluegreen-deployment
+  https://github.com/patrickpycheung/aws/blob/main/CodePipeline/Create_CodePipeline.yaml
+  https://www.capitalone.com/tech/cloud/seamless-blue-green-deployment-using-aws-codedeploy/
+  https://medium.com/@francisyzy/create-aws-elb-with-self-signed-ssl-cert-cd1c352331f
+  https://github.com/aws-samples/aws-codepipeline-cross-region-continuous-deployment/blob/master/cfn-templates/cross-region-code-pipeline.yaml
+Parameters:
+  aStackName:
+    Type: String
+    Description: Name of the stack.
+  pAppName:
+    Type: String
+    Description: Name of the App that is being created.
+  pVpc:
+    Type: AWS::EC2::VPC::Id
+  pVpcSubnet1:
+    Type: AWS::EC2::Subnet::Id
+  pVpcSubnet2:
+    Type: AWS::EC2::Subnet::Id
+  zPipeline:
+    Description: Create a Pipeline?
+    Default: false
+    Type: String
+    AllowedValues:
+      - true
+      - false
+    ConstraintDescription: You must specify true or false.
+Conditions:
+  CreatePipeline: !Equals
+    - !Ref zPipeline
+    - true
+Mappings:
+  SecondRegionMap:
+    us-east-1:
+      SecondRegion1: us-east-2
+    us-east-2:
+      SecondRegion2: us-east-1
+Resources:
+  # ECS Cluster Setup
+  rEcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: !Sub /${pAppName}/
+      RoleName: !Sub ${pAppName}-taskrole
+      Description: Role for ECS Containers.
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCodeCommitReadOnly
+        - arn:aws:iam::aws:policy/SecretsManagerReadWrite
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "ecs-tasks.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Tags:
+        - Key: Stack
+          Value: !Ref aStackName
+
+  rEcsContainerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub ${pAppName}-Container
+      VpcId: !Ref pVpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref pElbSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${pAppName} - Container Group
+
+  rEcsLogGroup:
+    Type: AWS::Logs:LogGroup
+    Properties:
+      LogGroupName: !Sub ${pAppName}/ecs/
+      RetentionInDays: 90
+
+  rEcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      CapacityProviders:
+        - FARGATE
+
+  rEcsService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - rEcsContainerSecurityGroup
+      - rEcsCluster
+      - rEcsTaskDefinition
+      - rElbListener
+      - rElbListenerRule
+      - rTargetGroup
+    Properties:
+      ServiceName: !Ref pAppName
+      Cluster: !Ref rEcsCluster
+      TaskDefinition: !Ref rEcsTaskDefinition
+      DeploymentController:
+        Type: CODE_DEPLOY
+      DeploymentConfiguration:
+        MinimumHealthyPrecent: 100
+        MaximumPrecent: 200
+      DesiredCount: 0
+      HealthCheckGracePeriodSeconds: 30
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !Ref pVpcSubnet1
+            - !Ref pVpcSubnet2
+          SecurityGroups:
+            - !Ref rEcsContainerSecurityGroup
+      LoadBalancers:
+        - ContainerName: frontend
+          ContainerPort: 443
+          TargetGroupArn: !Ref rTargetGroup
+  
+  rEcsTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn:
+      - rEcsLogGroup
+      - rEcsTaskRole
+    Properties:
+      Family: !Join ['', [!Ref pAppName, TaskDefinition]]
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 256
+      Memory: 0.5GB
+      ExecutionRoleArn: !Sub 'arn:aws:iam::${AWS::AccountId}:role/ecsTaskExecutionRole'
+      TaskRoleArn: !GetAtt rEcsTaskRole.Arn
+      ContainerDefinitions:
+        - Name: frontend
+          Image: !Ref pEcrRepoName
+          EntryPoint:
+            - bash
+            - run_server.sh
+          PortMappings:
+            - ContainerPort: 443
+          Environment:
+            - Name: REGION
+              Value: !Ref AWS::Region
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref rEcsLogGroup
+              awslogs-stream-prefix: ecs
+
+  # Elastic Load Balancer
+  rElbTargetGroupBlue:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: '/ping'
+      HealthCheckTimeoutSeconds: 5
+      UnhealthyThresholdCount: 2
+      HealthyThresholdCount: 2
+      Name: !Sub ${pAppName}-blue
+      Port: 443
+      Protocol: HTTPS
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 60
+      TargetType: ip
+      VpcId: !Ref pVpc
+
+  rElbTargetGroupGreen:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: '/ping'
+      HealthCheckTimeoutSeconds: 5
+      UnhealthyThresholdCount: 2
+      HealthyThresholdCount: 2
+      Name: !Sub ${pAppName}-green
+      Port: 443
+      Protocol: HTTPS
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 60
+      TargetType: ip
+      VpcId: !Ref pVpc
+
+  rElbListner:
+    Type: AWS::ElasticLoadbalancingV2::Listener
+    DependsOn:
+      - rElbTargetGroupBlue
+      - rElbTargetGroupGreen
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref rElbTargetGroupBlue
+      LoadBalancerArn: !Ref pLoadBalancerArn
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS-1-2-Ext-2018-06
+      Certificates:
+        - CertificateArn: !Ref pCert
+
+  rElbListnerHttpRedirect:
+    Type: AWS::ElasticLoadbalancingV2::Listener
+    DependsOn:
+      - rElbTargetGroupBlue
+      - rElbTargetGroupGreen
+    Properties:
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Port: 443
+            Protocol: HTTPS
+            Host: "#{host}"
+            Path: "/#{path}"
+            Query: "#{query}"
+            StatusCode: "HTTP_301"
+      LoadBalancerArn: !Ref pLoadBalancerArn
+      Port: 80
+      Protocol: HTTP
+      
+  # AutoScaling Group
+  rAutoScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: !Sub /${pAppName}/
+      RoleName: !Sub ${pAppName}-AutoScalingRole
+      Descriptions: Autoscaling role for application.
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceAutoscalRole'
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            PrincipalL:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Tags:
+        - Key: StackName
+          Value: !Ref aStackName
+
+  rAutoScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    DependsOn:
+      - rAutoScalingRole
+      - rEcsCluster
+      - rEcsService
+    Properties:
+      MinCapacity: 0
+      MaxCapacity: 3
+      ResourceId: !Join ['/', [ service, !Ref rEcsCluster, !GetAtt rEcsService.Name ]]
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+      RoleARN: !GetAtt rAutoScalingRole.Arn
+
+  rAutoScalingPolicyProd:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    DependsOn:
+      - rAutoScalingTarget
+    Properties:
+      PolicyName: !Join [ '', [!Ref pAppName, AutoScalingPolicy] ]
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref rAutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        ScaleInCooldown: 10
+        ScaleOutCooldown: 10
+        TargetValue: 50
+
+  # CodeCommit
+  rCodeCommit01:
+    Type: AWS::CodeCommit::Repository
+    DeletionPolicy: Delete
+    Properties:
+      RepositoryDescription: Repository for files.
+      RepositoryName: !Ref ${pAppName}
+      Tags:
+        - Key: Stack
+          Value: !Ref aStackName
+
+  # CodeBuild
+  rCodeBuildSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub ${pAppName}-CodeBuild
+      VpcId: !Ref pVpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${pAppName} - CodeBuild
+  
+  rCodeBuildProject01:
+    Type: AWS::CodeBuild::Project
+    DependsOn:
+      - rCodeBuildSecurityGroup
+      - rCodePipelineServiceRole
+    Properties:
+      Name: !Sub ${pAppName}-CodeBuild-01
+      Description: Builds a container Image
+      ServiceRole: !GetAtt rCodePipelineServiceRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: public.ecr.aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        PrivilagedMode: true
+        EnvironmentVariabled:
+          - Name: Stage
+            Type: PLAINTEXT
+            Value: prod
+        Source:
+          Type: CODEPIPELINE
+        TimeoutInMinutes: 10
+        VpcConfig:
+          VpcId: !Ref pVpc
+          Subnets: 
+            - !Ref pVpcSubnet1
+          SecurityGroupsIds:
+            - !Ref rCodeBuildSecurityGroup
+        LogsConfig:
+          CloudWatchLogs:
+            Status: ENABLED
+
+  # CodeDeploy
+  rCodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: !Sub ${pAppName}
+      ComputePlatform: ECS
+
+  rCodeDeployDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    DependsOn:
+      - rCodeDeployApplication
+      - rCodePipelineServiceRole
+      - rEcsService
+      - rElbListener
+      - rElbTargetGroupBlue
+      - rElbTargetGroupGreen
+    Properties:
+      ApplicationName: !Ref rCodeDeployApplication
+      DeploymentConfigName: CodeDeployDefault.ECSAllAtOnce
+      DeploymentGroupName: !Sub ${pAppName}
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events:
+          - DEPLOYMENT_FAILURE
+          - DEPLOYMENT_STOP_ON_REQUEST
+      BlueGreenDeploymentConfiguration:
+        DeploymentReadyOption:
+          ActionOnTimeout: CONTINUE_DEPLOYMENT
+          WaitTimeInMinutes: 0
+        TerminatBlueInstancesOnDeploymentSuccess:
+          Action: TERMINATE
+          TerminationWaitTimeinMinutes: 2880
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      ECSServices:
+        - ServiceName: !GetAtt rEcsService.Name
+          ClusterName: !Ref rEcsCluster
+        LoadBalancerInfo:
+          TargetGroupPairInfoList:
+            - ProdTrafficRoute:
+                ListenerArns:
+                  - !Ref rElbListener
+              TargetGroups:
+                - Name: !GetAtt rElbTargetGroupBlue.TargetGroupName
+                - Name: !GetAtt rElbTargetGroupGreen.TargetGroupName
+      ServiceRoleArn: !GetAtt rCodePipelineServiceRole.Arn
+
+  # Code Pipeline
+  rAppPipeline: 
+    Type: AWS::CodePipeline::Pipeline
+    Condition: CreatePipeline
+    Properties: 
+      Name: !Sub ${pEnvironment}-${pAppName}
+      RoleArn: !Ref rCodePipelineServiceRole
+      ArtifactStores:
+        - Region: !Ref ${AWS::Region}
+          ArtifactStore: 
+            Type: S3 
+            Location: !Ref rS3Bucket
+        # - Region: us-east-1
+        #   ArtifactStore: 
+        #     Type: S3 
+        #     Location: mybucket1
+        # - Region: us-east-2
+        #   ArtifactStore: 
+        #     Type: S3 
+        #     Location: mybucket2
+      Stages: 
+        - Name: Source 
+          Actions: 
+            - 
+              Name: SourceAction
+              ActionTypeId: 
+                Category: Source 
+                Owner: AWS 
+                Version: 1 
+                Provider: CodeCommit 
+              OutputArtifacts: 
+                - Name: SourceOutput 
+              Configuration: 
+                BranchName: main 
+                RepositoryName: !GetAtt rCodeCommit01.Name
+                PollForSourceChanges: false
+              RunOrder: 1 
+        - Name: BuildProdImage
+          Actions: 
+            - Name: BuildImage 
+              InputArtifacts: 
+                - Name: SourceOutput 
+              ActionTypeId: 
+                Category: Build 
+                Owner: AWS 
+                Version: 1 
+                Provider: CodeBuild
+              Configuration: 
+                ProjectName: !Ref rCodeBuildProject01 
+                EnvironmentVariables: '[{"name":"STAGE", "value":"prod", "type": "PLAINTEXT"}]'
+              RunOrder: 1
+        - Name: DeployProdImage
+          Actions:
+            - Name: PrimaryRegionTaskDef
+              InputArtifacts:
+                - Name: SourceOutput
+              OutPutArtifacts:
+                - Name: PrimaryRegionTaskDef
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref rCodeBuildProject01
+                EnvironmentVariables: !Sub |
+                  [
+                    {
+                      "name": "DATABASE_KEY",
+                      "value": "arn:aws:"
+                    },
+                    {
+                      "name": "DEPLOY_REGION",
+                      "value": "PrimaryRegion"
+                    }
+                  ]
+                RunOrder: 1
+            - Name: PrimaryRegionDeploy
+              Region: !Ref "AWS:Region"
+              InputArtifacts:
+                - Name: BuildOutput
+                - Name: SourceOutput
+                - Name: PrimaryRegionTaskDefOutput
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CodeDeployToECS
+              Configuration:
+                ApplicationName: !Ref rCodeDeployApplicationProd
+                DeploymentGroupName: !Ref rCodeDeployDeploymentGroupProd
+                AppSpecTemplateArtifact: SourceOutput
+                AppSpecTemplatePath: appspec.yaml
+                TaskDefinitionTemplateArtifact: PrimaryRegionTaskDefOutput
+                TaskDefinitionTemplatePath: taskdef.json
+                Image1ArtifactName: BuildOutput
+                Image1ContainerName: IMAGE
+              RunOrder: 2
+            - Name: SecondaryRegion1TaskDef
+              InputArtifacts:
+                - Name: SourceOutput
+              OutPutArtifacts:
+                - Name: SecondaryRegion1TaskDef
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref rCodeBuildProject01
+                EnvironmentVariables: !Sub |
+                  [
+                    {
+                      "name": "DATABASE_KEY",
+                      "value": "arn:aws:"
+                    },
+                    {
+                      "name": "DEPLOY_REGION",
+                      "value": "SecondRegion1"
+                    }
+                  ]
+                RunOrder: 1
+            - Name: SecondaryRegion1Deploy
+              Region: !FindInMap [SecondRegionMap, !Ref "AWS::Region", SecondRegion1]
+              InputArtifacts:
+                - Name: BuildOutput
+                - Name: SourceOutput
+                - Name: SecondRegion1TaskDefOutput
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CodeDeployToECS
+              Configuration:
+                ApplicationName: !Ref rCodeDeployApplicationProd
+                DeploymentGroupName: !Ref rCodeDeployDeploymentGroupProd
+                AppSpecTemplateArtifact: SourceOutput
+                AppSpecTemplatePath: appspec.yaml
+                TaskDefinitionTemplateArtifact: SecondRegion1TaskDefOutput
+                TaskDefinitionTemplatePath: taskdef.json
+                Image1ArtifactName: BuildOutput
+                Image1ContainerName: IMAGE
+              RunOrder: 2
+      Tags:
+        - Key: Stack
+          Value: !Ref aStackName
