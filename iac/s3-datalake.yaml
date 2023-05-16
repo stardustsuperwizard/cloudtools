@@ -36,7 +36,7 @@ Resources:
           - Sid: Enable IAM User Permissions
             Effect: Allow
             Principal:
-              AWS: !Sub 'arn:aws:iam::${AWS::AcountId}:root'
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
             Action: 'kms:*'
             Resource: '*'
           - Sid: Allow Administration of the key
@@ -59,7 +59,7 @@ Resources:
             Condition:
               ArnLike:
                 aws:PrincipalArn:
-                  - !Sub 'arn:aws:iam::${AWS:AcountId}:role/${pAppName}/*'
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${pAppName}/*'
           - Sid: Allow use of the key
             Effect: Allow
             Principal: '*'
@@ -74,7 +74,7 @@ Resources:
             Condition:
               ArnLike:
                 aws:PrincipalArn:
-                  - !Sub 'arn:aws:iam::${AWS:AcountId}:role/service-role/AWSGlueServiceRole'
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:role/service-role/AWSGlueServiceRole'
 
   rKeyAlias:
     Type: 'AWS::KMS::Alias'
