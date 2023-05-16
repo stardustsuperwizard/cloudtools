@@ -96,5 +96,5 @@ Resources:
               
 Outputs:
   oS3Bucket01:
-    Description: S3 Bucket for Raw files:
+    Description: S3 Bucket for Raw files
     Value: !Ref rS3Bucket01
