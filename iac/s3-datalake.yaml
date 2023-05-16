@@ -1,0 +1,100 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description:
+  Datalake buckets for use with AWS Glue and Athena.
+  
+Metadata:
+  Purpose:
+    Name: Datalake
+    
+Parameters:
+  aStackName:
+    Type: String
+    Description: Copy this value into the Stack Name field.
+    Default: prod-datalake-glue
+  pAppName:
+    Type: String
+    Description: Application Name for Tagging.
+  zUuid:
+    Type: String
+    Description: This is a UUID to help tie the buckets together and ensure unique global naming.
+  zUuid2:
+    Type: String
+    Description: This is a short version.
+  
+Resources:
+  rKey:
+    Type: 'AWS::KMS::Key'
+    Properties:
+      Description: Buckey Key
+      EnableKeyRotation: False
+      PendingWindowInDays: 7
+      KeyPolicy:
+        Version: '2012-10-17'
+        Id: key-default-1
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AcountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Allow Administration of the key
+            Effect: Allow
+            Principal: '*'
+            Action: 
+              - 'kms:Create*'
+              - 'kms:Describe*'
+              - 'kms:Enable*'
+              - 'kms:List*'
+              - 'kms:Put*'
+              - 'kms:Update*'
+              - 'kms:Revoke*'
+              - 'kms:Disable*'
+              - 'kms:Get*'
+              - 'kms:Delete*'
+              - 'kms:ScheduleKeyDeletion'
+              - 'kms:CancelKeyDeletion'
+            Resource: '*'
+            Condition:
+              ArnLike:
+                aws:PrincipalArn:
+                  - !Sub 'arn:aws:iam::${AWS:AcountId}:role/${pAppName}/*'
+          - Sid: Allow use of the key
+            Effect: Allow
+            Principal: '*'
+            Action: 
+              - 'kms:DescribeKey'
+              - 'kms:Encrypt'
+              - 'kms:Decrypt'
+              - 'kms:ReEncrypt'
+              - 'kms:GenerateDataKey'
+              - 'kms:GenerateDataKeyWithoutPlaintext'
+            Resource: '*'
+            Condition:
+              ArnLike:
+                aws:PrincipalArn:
+                  - !Sub 'arn:aws:iam::${AWS:AcountId}:role/service-role/AWSGlueServiceRole'
+
+  rKeyAlias:
+    Type: 'AWS::KMS::Alias'
+    Properties:
+      AliasName: !Sub alias/s3-${pAppName}
+      TargetKeyId: !Ref rKey
+      
+  rS3Bucket01:
+    Type: 'AWS::S3::Bucket'
+    DependsOn: rKey
+    Properties:
+      BucketName: !Sub aws-glue-${zUuid2}-${pAppName}-layer1raw
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              KMSMasterKeyID: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:${rKeyAlias}'
+              SSEAlgorithm: 'aws:kms'
+              
+              
+Outputs:
+  oS3Bucket01:
+    Description: S3 Bucket for Raw files:
+    Value: !Ref rS3Bucket01
