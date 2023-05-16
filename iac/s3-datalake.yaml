@@ -14,7 +14,7 @@ Parameters:
     Default: prod-datalake-glue
   pAppName:
     Type: String
-    Description: Application Name for Tagging.
+    Description: Application Name for Tagging and Bucket (use lowercase).
   zUuid:
     Type: String
     Description: This is a UUID to help tie the buckets together and ensure unique global naming.
